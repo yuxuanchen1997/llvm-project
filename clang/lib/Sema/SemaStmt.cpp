@@ -2763,6 +2763,13 @@ StmtResult Sema::BuildCXXForRangeStmt(SourceLocation ForLoc,
   VarDecl *RangeVar = cast<VarDecl>(RangeDS->getSingleDecl());
   QualType RangeVarType = RangeVar->getType();
 
+  if (getLangOpts().CPlusPlus23) {
+    Expr *Range = RangeVar->getInit();
+    if (auto *EWC = dyn_cast<ExprWithCleanups>(Range)) {
+      RangeVar->setInit(EWC->getSubExpr());
+    }
+  }
+
   DeclStmt *LoopVarDS = cast<DeclStmt>(LoopVarDecl);
   VarDecl *LoopVar = cast<VarDecl>(LoopVarDS->getSingleDecl());
 
