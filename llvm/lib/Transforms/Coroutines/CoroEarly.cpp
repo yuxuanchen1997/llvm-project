@@ -166,6 +166,16 @@ static void setCannotDuplicate(CoroIdInst *CoroId) {
       CB->setCannotDuplicate();
 }
 
+static void splitAllocFunction(Function &F, CoroIdInst *CoroId) {
+  Module *M = F.getParent();
+  auto FnTy = FunctionType::get(PointerType::getUnqual(F.getContext()), false);
+  Function *NewF =
+      Function::Create(FnTy, GlobalValue::LinkageTypes::InternalLinkage,
+                       F.getName() + ".ramp.alloc");
+  auto *BB = BasicBlock::Create(F.getContext(), "alloc.entry", NewF);
+  M->getFunctionList().push_back(NewF);
+}
+
 void Lowerer::lowerEarlyIntrinsics(Function &F) {
   CoroIdInst *CoroId = nullptr;
   SmallVector<CoroFreeInst *, 4> CoroFrees;

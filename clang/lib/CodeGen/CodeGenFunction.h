@@ -3347,6 +3347,8 @@ public:
   void EmitObjCAtSynchronizedStmt(const ObjCAtSynchronizedStmt &S);
   void EmitObjCAutoreleasePoolStmt(const ObjCAutoreleasePoolStmt &S);
 
+  llvm::Function *
+  GenerateOutlinedCoroutineAllocFunction(CodeGenFunction &ParentCGF);
   void EmitCoroutineBody(const CoroutineBodyStmt &S);
   void EmitCoreturnStmt(const CoreturnStmt &S);
   RValue EmitCoawaitExpr(const CoawaitExpr &E,

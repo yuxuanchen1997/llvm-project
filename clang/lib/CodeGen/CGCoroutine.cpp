@@ -640,7 +640,34 @@ static void emitBodyAndFallthrough(CodeGenFunction &CGF,
       CGF.EmitStmt(OnFallthrough);
 }
 
+llvm::Function *CodeGenFunction::GenerateOutlinedCoroutineAllocFunction(
+    CodeGenFunction &ParentCGF) {
+  auto *CoroFn = ParentCGF.CurFn;
+  auto Name = CoroFn->getName();
+  auto FnTy = llvm::FunctionType::get(
+      llvm::PointerType::getUnqual(getLLVMContext()), {}, /*isVarArg=*/false);
+  llvm::Function *Fn =
+      llvm::Function::Create(FnTy, llvm::GlobalValue::InternalLinkage,
+                             Name + ".ramp.alloc", CGM.getModule());
+
+  QualType RetTy = getContext().VoidPtrTy;
+
+  FunctionArgList Args;
+  const CGFunctionInfo &FnInfo =
+      CGM.getTypes().arrangeBuiltinFunctionDeclaration(RetTy, Args);
+
+  StartFunction(GlobalDecl(), RetTy, Fn, FnInfo, Args);
+  auto *CoroId = Builder.CreateCall(
+      CGM.getIntrinsic(llvm::Intrinsic::coro_ref_id), {CoroFn});
+  FinishFunction();
+  return CurFn;
+}
+
 void CodeGenFunction::EmitCoroutineBody(const CoroutineBodyStmt &S) {
+  CodeGenFunction HelperCGF(CGM, /*suppressNewContext=*/true);
+  HelperCGF.ParentCGF = this;
+  HelperCGF.GenerateOutlinedCoroutineAllocFunction(*this);
+
   auto *NullPtr = llvm::ConstantPointerNull::get(Builder.getPtrTy());
   auto &TI = CGM.getContext().getTargetInfo();
   unsigned NewAlign = TI.getNewAlign() / TI.getCharWidth();

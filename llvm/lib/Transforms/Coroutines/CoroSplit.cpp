@@ -1212,6 +1212,8 @@ static void replaceFrameSizeAndAlignment(coro::Shape &Shape) {
   }
 }
 
+static void outlineFrameAlloc(coro::Shape &Shape) {}
+
 // Create a global constant array containing pointers to functions provided and
 // set Info parameter of CoroBegin to point at this constant. Example:
 //
