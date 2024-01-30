@@ -641,7 +641,7 @@ static void emitBodyAndFallthrough(CodeGenFunction &CGF,
 }
 
 llvm::Function *CodeGenFunction::GenerateOutlinedCoroutineAllocFunction(
-    CodeGenFunction &ParentCGF) {
+    CodeGenFunction &ParentCGF, const CoroutineBodyStmt &S) {
   auto *CoroFn = ParentCGF.CurFn;
   auto Name = CoroFn->getName();
   auto FnTy = llvm::FunctionType::get(
@@ -657,8 +657,22 @@ llvm::Function *CodeGenFunction::GenerateOutlinedCoroutineAllocFunction(
       CGM.getTypes().arrangeBuiltinFunctionDeclaration(RetTy, Args);
 
   StartFunction(GlobalDecl(), RetTy, Fn, FnInfo, Args);
+  auto *EntryBB = Builder.GetInsertBlock();
+  auto *AllocBB = createBasicBlock("coro.ramp.alloc");
+  auto *RetBB = createBasicBlock("coro.ramp.ret");
+
   auto *CoroId = Builder.CreateCall(
       CGM.getIntrinsic(llvm::Intrinsic::coro_ref_id), {CoroFn});
+  auto *CoroAlloc = Builder.CreateCall(CGM.getIntrinsic(llvm::Intrinsic::coro_alloc), {CoroId});
+  Builder.CreateCondBr(CoroAlloc, AllocBB, RetBB);
+  EmitBlock(AllocBB);
+  auto *AllocateCall = EmitScalarExpr(S.getAllocate());
+
+  EmitBlock(RetBB);
+  auto *Phi = Builder.CreatePHI(VoidPtrTy, 2);
+  Phi->addIncoming(NullPtr, EntryBB);
+  Phi->addIncoming(AllocateCall, AllocBB);
+  Builder.CreateRet(Phi);
   FinishFunction();
   return CurFn;
 }
