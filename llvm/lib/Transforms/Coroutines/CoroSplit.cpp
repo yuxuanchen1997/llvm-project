@@ -83,6 +83,8 @@ namespace {
 class CoroCloner {
 public:
   enum class Kind {
+    /// Begin the coroutine after allocation
+    SwitchBegin,
     /// The shared resume function for a switch lowering.
     SwitchResume,
 
@@ -146,6 +148,7 @@ private:
     switch (FKind) {
     case Kind::Async:
     case Kind::Continuation:
+    case Kind::SwitchBegin:
     case Kind::SwitchResume:
       return false;
     case Kind::SwitchUnwind:
@@ -1211,8 +1214,6 @@ static void replaceFrameSizeAndAlignment(coro::Shape &Shape) {
     CS->eraseFromParent();
   }
 }
-
-static void outlineFrameAlloc(coro::Shape &Shape) {}
 
 // Create a global constant array containing pointers to functions provided and
 // set Info parameter of CoroBegin to point at this constant. Example:

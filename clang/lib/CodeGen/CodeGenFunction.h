@@ -3347,8 +3347,15 @@ public:
   void EmitObjCAtSynchronizedStmt(const ObjCAtSynchronizedStmt &S);
   void EmitObjCAutoreleasePoolStmt(const ObjCAutoreleasePoolStmt &S);
 
-  llvm::Function * GenerateOutlinedCoroutineAllocFunction(
-      CodeGenFunction &ParentCGF, const CoroutineBodyStmt &S);
+  llvm::Function *
+  GenerateOutlinedCoroutineAllocFunction(CodeGenFunction &ParentCGF,
+                                         const CoroutineBodyStmt &S);
+  llvm::Function *
+  GenerateOutlinedCoroutineBeginFunction(CodeGenFunction &ParentCGF,
+                                         const CoroutineBodyStmt &S);
+  void GenerateCoroutineCommonBody(const CoroutineBodyStmt &S,
+                                   llvm::CallInst *CoroId, llvm::Value *Frame,
+                                   bool OmitParamMove);
   void EmitCoroutineBody(const CoroutineBodyStmt &S);
   void EmitCoreturnStmt(const CoreturnStmt &S);
   RValue EmitCoawaitExpr(const CoawaitExpr &E,

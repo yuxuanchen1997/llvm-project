@@ -646,9 +646,8 @@ llvm::Function *CodeGenFunction::GenerateOutlinedCoroutineAllocFunction(
   auto Name = CoroFn->getName();
   auto FnTy = llvm::FunctionType::get(
       llvm::PointerType::getUnqual(getLLVMContext()), {}, /*isVarArg=*/false);
-  llvm::Function *Fn =
-      llvm::Function::Create(FnTy, llvm::GlobalValue::InternalLinkage,
-                             Name + ".ramp.alloc", CGM.getModule());
+  llvm::Function *Fn = llvm::Function::Create(
+      FnTy, CoroFn->getLinkage(), Name + ".outline.alloc", CGM.getModule());
 
   QualType RetTy = getContext().VoidPtrTy;
 
@@ -658,86 +657,40 @@ llvm::Function *CodeGenFunction::GenerateOutlinedCoroutineAllocFunction(
 
   StartFunction(GlobalDecl(), RetTy, Fn, FnInfo, Args);
   auto *EntryBB = Builder.GetInsertBlock();
-  auto *AllocBB = createBasicBlock("coro.ramp.alloc");
-  auto *RetBB = createBasicBlock("coro.ramp.ret");
+  auto *AllocBB = createBasicBlock("coro.alloc");
+  auto *RetBB = createBasicBlock("coro.alloc.ret");
 
   auto *CoroId = Builder.CreateCall(
       CGM.getIntrinsic(llvm::Intrinsic::coro_ref_id), {CoroFn});
-  auto *CoroAlloc = Builder.CreateCall(CGM.getIntrinsic(llvm::Intrinsic::coro_alloc), {CoroId});
+  auto *CoroAlloc = Builder.CreateCall(
+      CGM.getIntrinsic(llvm::Intrinsic::coro_alloc), {CoroId});
   Builder.CreateCondBr(CoroAlloc, AllocBB, RetBB);
   EmitBlock(AllocBB);
+
   auto *AllocateCall = EmitScalarExpr(S.getAllocate());
+  // TODO: handle allocation failure like below
 
   EmitBlock(RetBB);
   auto *Phi = Builder.CreatePHI(VoidPtrTy, 2);
+  auto *NullPtr = llvm::ConstantPointerNull::get(Builder.getPtrTy());
   Phi->addIncoming(NullPtr, EntryBB);
   Phi->addIncoming(AllocateCall, AllocBB);
-  Builder.CreateRet(Phi);
+  Builder.CreateStore(Phi, ReturnValue);
   FinishFunction();
   return CurFn;
 }
 
-void CodeGenFunction::EmitCoroutineBody(const CoroutineBodyStmt &S) {
-  CodeGenFunction HelperCGF(CGM, /*suppressNewContext=*/true);
-  HelperCGF.ParentCGF = this;
-  HelperCGF.GenerateOutlinedCoroutineAllocFunction(*this);
+void CodeGenFunction::GenerateCoroutineCommonBody(const CoroutineBodyStmt &S,
+                                                  llvm::CallInst *CoroId,
+                                                  llvm::Value *Frame,
+                                                  bool OmitParamMove) {
 
-  auto *NullPtr = llvm::ConstantPointerNull::get(Builder.getPtrTy());
-  auto &TI = CGM.getContext().getTargetInfo();
-  unsigned NewAlign = TI.getNewAlign() / TI.getCharWidth();
-
-  auto *EntryBB = Builder.GetInsertBlock();
-  auto *AllocBB = createBasicBlock("coro.alloc");
-  auto *InitBB = createBasicBlock("coro.init");
+  auto *RetBB = CurCoro.Data->SuspendBB;
   auto *FinalBB = createBasicBlock("coro.final");
-  auto *RetBB = createBasicBlock("coro.ret");
+  auto *NullPtr = llvm::ConstantPointerNull::get(Builder.getPtrTy());
 
-  auto *CoroId = Builder.CreateCall(
-      CGM.getIntrinsic(llvm::Intrinsic::coro_id),
-      {Builder.getInt32(NewAlign), NullPtr, NullPtr, NullPtr});
-  createCoroData(*this, CurCoro, CoroId);
-  CurCoro.Data->SuspendBB = RetBB;
-  assert(ShouldEmitLifetimeMarkers &&
-         "Must emit lifetime intrinsics for coroutines");
-
-  // Backend is allowed to elide memory allocations, to help it, emit
-  // auto mem = coro.alloc() ? 0 : ... allocation code ...;
-  auto *CoroAlloc = Builder.CreateCall(
-      CGM.getIntrinsic(llvm::Intrinsic::coro_alloc), {CoroId});
-
-  Builder.CreateCondBr(CoroAlloc, AllocBB, InitBB);
-
-  EmitBlock(AllocBB);
-  auto *AllocateCall = EmitScalarExpr(S.getAllocate());
-  auto *AllocOrInvokeContBB = Builder.GetInsertBlock();
-
-  // Handle allocation failure if 'ReturnStmtOnAllocFailure' was provided.
-  if (auto *RetOnAllocFailure = S.getReturnStmtOnAllocFailure()) {
-    auto *RetOnFailureBB = createBasicBlock("coro.ret.on.failure");
-
-    // See if allocation was successful.
-    auto *NullPtr = llvm::ConstantPointerNull::get(Int8PtrTy);
-    auto *Cond = Builder.CreateICmpNE(AllocateCall, NullPtr);
-    // Expect the allocation to be successful.
-    emitCondLikelihoodViaExpectIntrinsic(Cond, Stmt::LH_Likely);
-    Builder.CreateCondBr(Cond, InitBB, RetOnFailureBB);
-
-    // If not, return OnAllocFailure object.
-    EmitBlock(RetOnFailureBB);
-    EmitStmt(RetOnAllocFailure);
-  }
-  else {
-    Builder.CreateBr(InitBB);
-  }
-
-  EmitBlock(InitBB);
-
-  // Pass the result of the allocation to coro.begin.
-  auto *Phi = Builder.CreatePHI(VoidPtrTy, 2);
-  Phi->addIncoming(NullPtr, EntryBB);
-  Phi->addIncoming(AllocateCall, AllocOrInvokeContBB);
   auto *CoroBegin = Builder.CreateCall(
-      CGM.getIntrinsic(llvm::Intrinsic::coro_begin), {CoroId, Phi});
+      CGM.getIntrinsic(llvm::Intrinsic::coro_begin), {CoroId, Frame});
   CurCoro.Data->CoroBegin = CoroBegin;
 
   GetReturnObjectManager GroManager(*this, S);
@@ -750,25 +703,28 @@ void CodeGenFunction::EmitCoroutineBody(const CoroutineBodyStmt &S) {
     CodeGenFunction::RunCleanupsScope ResumeScope(*this);
     EHStack.pushCleanup<CallCoroDelete>(NormalAndEHCleanup, S.getDeallocate());
 
-    // Create mapping between parameters and copy-params for coroutine function.
-    llvm::ArrayRef<const Stmt *> ParamMoves = S.getParamMoves();
-    assert(
-        (ParamMoves.size() == 0 || (ParamMoves.size() == FnArgs.size())) &&
-        "ParamMoves and FnArgs should be the same size for coroutine function");
-    if (ParamMoves.size() == FnArgs.size() && DI)
-      for (const auto Pair : llvm::zip(FnArgs, ParamMoves))
-        DI->getCoroutineParameterMappings().insert(
-            {std::get<0>(Pair), std::get<1>(Pair)});
+    if (!OmitParamMove) {
+      // Create mapping between parameters and copy-params for coroutine
+      // function.
+      llvm::ArrayRef<const Stmt *> ParamMoves = S.getParamMoves();
+      assert((ParamMoves.size() == 0 || (ParamMoves.size() == FnArgs.size())) &&
+             "ParamMoves and FnArgs should be the same size for coroutine "
+             "function");
+      if (ParamMoves.size() == FnArgs.size() && DI)
+        for (const auto Pair : llvm::zip(FnArgs, ParamMoves))
+          DI->getCoroutineParameterMappings().insert(
+              {std::get<0>(Pair), std::get<1>(Pair)});
 
-    // Create parameter copies. We do it before creating a promise, since an
-    // evolution of coroutine TS may allow promise constructor to observe
-    // parameter copies.
-    for (auto *PM : S.getParamMoves()) {
-      EmitStmt(PM);
-      ParamReplacer.addCopy(cast<DeclStmt>(PM));
-      // TODO: if(CoroParam(...)) need to surround ctor and dtor
-      // for the copy, so that llvm can elide it if the copy is
-      // not needed.
+      // Create parameter copies. We do it before creating a promise, since an
+      // evolution of coroutine TS may allow promise constructor to observe
+      // parameter copies.
+      for (auto *PM : S.getParamMoves()) {
+        EmitStmt(PM);
+        ParamReplacer.addCopy(cast<DeclStmt>(PM));
+        // TODO: if(CoroParam(...)) need to surround ctor and dtor
+        // for the copy, so that llvm can elide it if the copy is
+        // not needed.
+      }
     }
 
     EmitStmt(S.getPromiseDeclStmt());
@@ -860,6 +816,110 @@ void CodeGenFunction::EmitCoroutineBody(const CoroutineBodyStmt &S) {
   if (CXXRecordDecl *RD = FnRetTy->getAsCXXRecordDecl();
       RD && RD->hasAttr<CoroOnlyDestroyWhenCompleteAttr>())
     CurFn->setCoroDestroyOnlyWhenComplete();
+}
+
+llvm::Function *CodeGenFunction::GenerateOutlinedCoroutineBeginFunction(
+    CodeGenFunction &ParentCGF, const CoroutineBodyStmt &S) {
+  auto *CoroFn = ParentCGF.CurFn;
+  auto Name = CoroFn->getName();
+  auto FnTy = llvm::FunctionType::get(
+      CoroFn->getReturnType(), {llvm::PointerType::getUnqual(getLLVMContext())},
+      /*isVarArg=*/false);
+  llvm::Function *Fn = llvm::Function::Create(
+      FnTy, CoroFn->getLinkage(), Name + ".outline.begin", CGM.getModule());
+
+  QualType RetTy = cast<FunctionDecl>(ParentCGF.CurFuncDecl)->getReturnType();
+
+  FunctionArgList Args;
+  Args.push_back(ImplicitParamDecl::Create(getContext(), getContext().VoidPtrTy,
+                                           ImplicitParamKind::Other));
+  const CGFunctionInfo &FnInfo =
+      CGM.getTypes().arrangeBuiltinFunctionDeclaration(RetTy, Args);
+
+  StartFunction(GlobalDecl(), RetTy, Fn, FnInfo, Args);
+
+  auto *NullPtr = llvm::ConstantPointerNull::get(Builder.getPtrTy());
+  auto &TI = CGM.getContext().getTargetInfo();
+  unsigned NewAlign = TI.getNewAlign() / TI.getCharWidth();
+
+  auto *RetBB = createBasicBlock("coro.ret");
+
+  auto *CoroId = Builder.CreateCall(
+      CGM.getIntrinsic(llvm::Intrinsic::coro_id),
+      {Builder.getInt32(NewAlign), NullPtr, NullPtr, NullPtr});
+  createCoroData(*this, CurCoro, CoroId);
+  CurCoro.Data->SuspendBB = RetBB;
+
+  // GenerateCoroutineCommonBody(S, CoroId, Fn->getArg(0), true);
+  FinishFunction();
+  return CurFn;
+}
+
+void CodeGenFunction::EmitCoroutineBody(const CoroutineBodyStmt &S) {
+  {
+    CodeGenFunction HelperCGF(CGM, /*suppressNewContext=*/true);
+    HelperCGF.ParentCGF = this;
+    HelperCGF.GenerateOutlinedCoroutineAllocFunction(*this, S);
+  }
+  {
+    CodeGenFunction HelperCGF(CGM, /*suppressNewContext=*/true);
+    HelperCGF.ParentCGF = this;
+    HelperCGF.GenerateOutlinedCoroutineBeginFunction(*this, S);
+  }
+  auto *NullPtr = llvm::ConstantPointerNull::get(Builder.getPtrTy());
+  auto &TI = CGM.getContext().getTargetInfo();
+  unsigned NewAlign = TI.getNewAlign() / TI.getCharWidth();
+
+  auto *EntryBB = Builder.GetInsertBlock();
+  auto *AllocBB = createBasicBlock("coro.alloc");
+  auto *InitBB = createBasicBlock("coro.init");
+  auto *RetBB = createBasicBlock("coro.ret");
+
+  auto *CoroId = Builder.CreateCall(
+      CGM.getIntrinsic(llvm::Intrinsic::coro_id),
+      {Builder.getInt32(NewAlign), NullPtr, NullPtr, NullPtr});
+  createCoroData(*this, CurCoro, CoroId);
+  CurCoro.Data->SuspendBB = RetBB;
+  assert(ShouldEmitLifetimeMarkers &&
+         "Must emit lifetime intrinsics for coroutines");
+
+  // Backend is allowed to elide memory allocations, to help it, emit
+  // auto mem = coro.alloc() ? 0 : ... allocation code ...;
+  auto *CoroAlloc = Builder.CreateCall(
+      CGM.getIntrinsic(llvm::Intrinsic::coro_alloc), {CoroId});
+
+  Builder.CreateCondBr(CoroAlloc, AllocBB, InitBB);
+
+  EmitBlock(AllocBB);
+  auto *AllocateCall = EmitScalarExpr(S.getAllocate());
+  auto *AllocOrInvokeContBB = Builder.GetInsertBlock();
+
+  // Handle allocation failure if 'ReturnStmtOnAllocFailure' was provided.
+  if (auto *RetOnAllocFailure = S.getReturnStmtOnAllocFailure()) {
+    auto *RetOnFailureBB = createBasicBlock("coro.ret.on.failure");
+
+    // See if allocation was successful.
+    auto *NullPtr = llvm::ConstantPointerNull::get(Int8PtrTy);
+    auto *Cond = Builder.CreateICmpNE(AllocateCall, NullPtr);
+    // Expect the allocation to be successful.
+    emitCondLikelihoodViaExpectIntrinsic(Cond, Stmt::LH_Likely);
+    Builder.CreateCondBr(Cond, InitBB, RetOnFailureBB);
+
+    // If not, return OnAllocFailure object.
+    EmitBlock(RetOnFailureBB);
+    EmitStmt(RetOnAllocFailure);
+  } else {
+    Builder.CreateBr(InitBB);
+  }
+
+  EmitBlock(InitBB);
+
+  // Pass the result of the allocation to coro.begin.
+  auto *Phi = Builder.CreatePHI(VoidPtrTy, 2);
+  Phi->addIncoming(NullPtr, EntryBB);
+  Phi->addIncoming(AllocateCall, AllocOrInvokeContBB);
+
+  GenerateCoroutineCommonBody(S, CoroId, Phi, false);
 }
 
 // Emit coroutine intrinsic and patch up arguments of the token type.
