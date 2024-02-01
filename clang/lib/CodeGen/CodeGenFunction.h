@@ -3355,6 +3355,7 @@ public:
                                          const CoroutineBodyStmt &S);
   void GenerateCoroutineCommonBody(const CoroutineBodyStmt &S,
                                    llvm::CallInst *CoroId, llvm::Value *Frame,
+                                   llvm::SmallVector<const ParmVarDecl*, 4> FnArgs,
                                    bool OmitParamMove);
   void EmitCoroutineBody(const CoroutineBodyStmt &S);
   void EmitCoreturnStmt(const CoreturnStmt &S);

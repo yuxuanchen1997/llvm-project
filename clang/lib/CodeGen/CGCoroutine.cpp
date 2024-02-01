@@ -385,6 +385,7 @@ namespace {
   struct ParamReferenceReplacerRAII {
     CodeGenFunction::DeclMapTy SavedLocals;
     CodeGenFunction::DeclMapTy& LocalDeclMap;
+    llvm::DenseSet<const Decl *> RemoveWhenDone;
 
     ParamReferenceReplacerRAII(CodeGenFunction::DeclMapTy &LocalDeclMap)
         : LocalDeclMap(LocalDeclMap) {}
@@ -410,9 +411,24 @@ namespace {
       it->second = copyIt->getSecond();
     }
 
+    void addSubstitute(const Decl *D, Address Addr) {
+      auto it = LocalDeclMap.find(D);
+      if (it != LocalDeclMap.end()) {
+        SavedLocals.insert({D, it->second});
+        it->second = Addr;
+      } else {
+        RemoveWhenDone.insert(D);
+        LocalDeclMap.insert({D, Addr});
+      }
+    }
+
     ~ParamReferenceReplacerRAII() {
       for (auto&& SavedLocal : SavedLocals) {
         LocalDeclMap.insert({SavedLocal.first, SavedLocal.second});
+      }
+
+      for (auto * D : RemoveWhenDone) {
+        LocalDeclMap.erase(D);
       }
     }
   };
@@ -611,8 +627,10 @@ struct GetReturnObjectManager {
       // otherwise the call to get_return_object wouldn't be in front
       // of initial_suspend.
       if (CGF.ReturnValue.isValid()) {
-        CGF.EmitAnyExprToMem(S.getReturnValue(), CGF.ReturnValue,
-                             S.getReturnValue()->getType().getQualifiers(),
+        auto *RV = S.getReturnValue();
+        assert(RV);
+        CGF.EmitAnyExprToMem(RV, CGF.ReturnValue,
+                             RV->getType().getQualifiers(),
                              /*IsInit*/ true);
       }
       return;
@@ -683,6 +701,7 @@ llvm::Function *CodeGenFunction::GenerateOutlinedCoroutineAllocFunction(
 void CodeGenFunction::GenerateCoroutineCommonBody(const CoroutineBodyStmt &S,
                                                   llvm::CallInst *CoroId,
                                                   llvm::Value *Frame,
+                                                  llvm::SmallVector<const ParmVarDecl *, 4> FnArgs,
                                                   bool OmitParamMove) {
 
   auto *RetBB = CurCoro.Data->SuspendBB;
@@ -724,6 +743,17 @@ void CodeGenFunction::GenerateCoroutineCommonBody(const CoroutineBodyStmt &S,
         // TODO: if(CoroParam(...)) need to surround ctor and dtor
         // for the copy, so that llvm can elide it if the copy is
         // not needed.
+      }
+    } else {
+      for (auto *Decl: FnArgs) {
+        llvm::Function *CoroParamPtr = CGM.getIntrinsic(llvm::Intrinsic::coro_param_ptr);
+        auto *Index = Builder.getInt32(0); // TODO
+        auto ParamPtr = Builder.CreateCall(CoroParamPtr,
+                           {Frame, Index});
+
+        CharUnits Alignment = getContext().getDeclAlign(Decl);
+        Address Addr(ParamPtr, ConvertType(Decl->getType()), Alignment);
+        ParamReplacer.addSubstitute(Decl, Addr);
       }
     }
 
@@ -850,7 +880,7 @@ llvm::Function *CodeGenFunction::GenerateOutlinedCoroutineBeginFunction(
   createCoroData(*this, CurCoro, CoroId);
   CurCoro.Data->SuspendBB = RetBB;
 
-  // GenerateCoroutineCommonBody(S, CoroId, Fn->getArg(0), true);
+  GenerateCoroutineCommonBody(S, CoroId, Fn->getArg(0), ParentCGF.FnArgs, true);
   FinishFunction();
   return CurFn;
 }
@@ -919,7 +949,7 @@ void CodeGenFunction::EmitCoroutineBody(const CoroutineBodyStmt &S) {
   Phi->addIncoming(NullPtr, EntryBB);
   Phi->addIncoming(AllocateCall, AllocOrInvokeContBB);
 
-  GenerateCoroutineCommonBody(S, CoroId, Phi, false);
+  // GenerateCoroutineCommonBody(S, CoroId, Phi, FnArgs, false);
 }
 
 // Emit coroutine intrinsic and patch up arguments of the token type.
