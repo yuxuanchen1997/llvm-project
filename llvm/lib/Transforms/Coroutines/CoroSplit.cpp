@@ -23,7 +23,9 @@
 #include "CoroInternal.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PriorityWorklist.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -1516,6 +1518,11 @@ struct SwitchCoroutineSplitter {
     // pointed by the last argument of @llvm.coro.info, so that CoroElide pass
     // can determined correct function to call.
     setCoroInfo(F, Shape, Clones);
+
+    auto AllocFunclet = createSwitchCoroutineAllocFunclet(F, Shape);
+    auto BeginFunclet = createSwitchCoroutineBeginFunclet(F, Shape);
+    postSplitCleanup(*AllocFunclet);
+    postSplitCleanup(*BeginFunclet);
   }
 
 private:
@@ -1710,6 +1717,123 @@ private:
     LLVMContext &C = F.getContext();
     auto *BC = ConstantExpr::getPointerCast(GV, PointerType::getUnqual(C));
     Shape.getSwitchCoroId()->setInfo(BC);
+  }
+
+  static Function *createSwitchCoroutineAllocFunclet(Function &F,
+                                                     coro::Shape &Shape) {
+    Module *M = F.getParent();
+    auto &Context = F.getContext();
+    auto *FnTy = FunctionType::get(PointerType::getUnqual(Context), {});
+    auto *NewF =
+        Function::Create(FnTy, GlobalValue::LinkageTypes::ExternalLinkage,
+                         F.getName() + ".alloc");
+    M->getFunctionList().insert(M->end(), NewF);
+    ValueToValueMapTy VMap;
+
+    // Replace all args with dummy instructions. If an argument is the old frame
+    // pointer, the dummy will be replaced by the new frame pointer once it is
+    // computed below. Uses of all other arguments should have already been
+    // rewritten by buildCoroutineFrame() to use loads/stores on the coroutine
+    // frame.
+    SmallVector<Instruction *> DummyArgs;
+    for (Argument &A : F.args()) {
+      DummyArgs.push_back(new FreezeInst(PoisonValue::get(A.getType())));
+      VMap[&A] = DummyArgs.back();
+    }
+
+    SmallVector<ReturnInst *, 4> Returns;
+    CloneFunctionInto(NewF, &F, VMap, CloneFunctionChangeType::LocalChangesOnly,
+                      Returns);
+    Value *CoroBegin = VMap[Shape.CoroBegin];
+    CoroBeginInst *Inst = cast<CoroBeginInst>(CoroBegin);
+    auto *RetBB =
+        Inst->getParent()->splitBasicBlockBefore(Inst, "coro.alloc.ret");
+    auto *RetInst = ReturnInst::Create(Context, Inst->getMem());
+    ReplaceInstWithInst(RetBB->getTerminator(), RetInst);
+    EliminateUnreachableBlocks(*NewF);
+
+    for (Instruction *DummyArg : DummyArgs) {
+      DummyArg->replaceAllUsesWith(PoisonValue::get(DummyArg->getType()));
+      DummyArg->deleteValue();
+    }
+
+    return NewF;
+  }
+
+  static Function *createSwitchCoroutineBeginFunclet(Function &F,
+                                                     coro::Shape &Shape) {
+    Module *M = F.getParent();
+    auto &Context = F.getContext();
+    auto *FnTy = FunctionType::get(F.getReturnType(),
+                                   {PointerType::getUnqual(Context)}, false);
+    auto *NewF =
+        Function::Create(FnTy, GlobalValue::LinkageTypes::ExternalLinkage,
+                         F.getName() + ".begin");
+    M->getFunctionList().insert(M->end(), NewF);
+    SmallVector<ReturnInst *, 4> Returns;
+    ValueToValueMapTy VMap;
+
+    // Replace all args with dummy instructions. If an argument is the old frame
+    // pointer, the dummy will be replaced by the new frame pointer once it is
+    // computed below. Uses of all other arguments should have already been
+    // rewritten by buildCoroutineFrame() to use loads/stores on the coroutine
+    // frame.
+    SmallVector<Instruction *> DummyArgs;
+    for (Argument &A : F.args()) {
+      DummyArgs.push_back(new FreezeInst(PoisonValue::get(A.getType())));
+      VMap[&A] = DummyArgs.back();
+    }
+
+    CloneFunctionInto(NewF, &F, VMap, CloneFunctionChangeType::LocalChangesOnly,
+                      Returns);
+
+    CoroBeginInst *Inst =
+        cast<CoroBeginInst>(static_cast<Value *>(VMap[Shape.CoroBegin]));
+    Inst->getMem()->replaceAllUsesWith(NewF->getArg(0));
+
+    auto &OldEntryBlock = NewF->getEntryBlock();
+    auto *NewBB = OldEntryBlock.splitBasicBlockBefore(
+        OldEntryBlock.getFirstNonPHIOrDbgOrAlloca());
+    auto *PrevCII =
+        cast<CoroIdInst>(static_cast<Value *>(VMap[Shape.getSwitchCoroId()]));
+
+    PrevCII->moveBefore(NewBB->getTerminator());
+    PrevCII->getCoroAlloc()->moveBefore(NewBB->getTerminator());
+
+    ReplaceInstWithInst(NewBB->getTerminator(),
+                        BranchInst::Create(Inst->getParent()));
+
+    for (Instruction *DummyArg : DummyArgs) {
+      SmallSet<Instruction *, 4> InstructionsToPrune;
+      for (auto *User : DummyArg->users()) {
+        if (auto *I = dyn_cast<Instruction>(User)) {
+          InstructionsToPrune.insert(I);
+        }
+      }
+
+      for (auto *I : InstructionsToPrune) {
+        I->eraseFromParent();
+      }
+
+      DummyArg->deleteValue();
+    }
+
+    EliminateUnreachableBlocks(*NewF);
+
+    Value *FramePtr = VMap[Shape.FramePtr];
+    SmallSet<CoroEndInst *, 4> CoroEnds;
+
+    for (auto &I : instructions(NewF)) {
+      if (auto *CEI = dyn_cast<CoroEndInst>(&I)) {
+        CoroEnds.insert(CEI);
+      }
+    }
+
+    for (const auto &CEI : CoroEnds) {
+      replaceCoroEnd(CEI, Shape, FramePtr, /*in resume*/ false, nullptr);
+    }
+
+    return NewF;
   }
 };
 
