@@ -417,6 +417,7 @@ private:
 
   void removeAllAssertingVHReferences(Value *V);
   bool eliminateAssumptions(Function &F);
+  bool eliminateSmuggledPointers(Function &F);
   bool eliminateFallThrough(Function &F, DominatorTree *DT = nullptr);
   bool eliminateMostlyEmptyBlocks(Function &F);
   BasicBlock *findDestBlockOfMergeableEmptyBlock(BasicBlock *BB);
@@ -617,6 +618,8 @@ bool CodeGenPrepare::_run(Function &F) {
     }
   }
 
+  EverMadeChange |= eliminateSmuggledPointers(F);
+
   // Get rid of @llvm.assume builtins before attempting to eliminate empty
   // blocks, since there might be blocks that only contain @llvm.assume calls
   // (plus arguments that we can get rid of).
@@ -784,6 +787,27 @@ bool CodeGenPrepare::eliminateAssumptions(Function &F) {
         MadeChange = true;
         Value *Operand = Assume->getOperand(0);
         Assume->eraseFromParent();
+
+        resetIteratorIfInvalidatedWhileCalling(&BB, [&]() {
+          RecursivelyDeleteTriviallyDeadInstructions(Operand, TLInfo, nullptr);
+        });
+      }
+    }
+  }
+  return MadeChange;
+}
+
+bool CodeGenPrepare::eliminateSmuggledPointers(Function &F) {
+  bool MadeChange = false;
+  for (BasicBlock &BB : F) {
+    CurInstIterator = BB.begin();
+    while (CurInstIterator != BB.end()) {
+      Instruction *I = &*(CurInstIterator++);
+      if (auto *Smuggle = dyn_cast<SmugglePtrInst>(I)) {
+        MadeChange = true;
+        Value *Operand = Smuggle->getOperand(0);
+        Smuggle->replaceAllUsesWith(Operand);
+        Smuggle->eraseFromParent();
 
         resetIteratorIfInvalidatedWhileCalling(&BB, [&]() {
           RecursivelyDeleteTriviallyDeadInstructions(Operand, TLInfo, nullptr);

@@ -455,6 +455,10 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
   case Intrinsic::lifetime_end:
     // Discard region information.
     break;
+  case Intrinsic::smuggle_ptr:
+    CI->replaceAllUsesWith(CI->getOperand(0));
+    CI->eraseFromParent();
+    break;
   }
 
   assert(CI->use_empty() &&

@@ -926,6 +926,12 @@ def Launder : Builtin {
   let Prototype = "void*(void*)";
 }
 
+def Smuggle : Builtin {
+  let Spellings = ["__builtin_smuggle"];
+  let Attributes = [NoThrow, CustomTypeChecking, Constexpr];
+  let Prototype = "void*(void*)";
+}
+
 def IsConstantEvaluated : LangBuiltin<"CXX_LANG"> {
   let Spellings = ["__builtin_is_constant_evaluated"];
   let Attributes = [NoThrow, Constexpr];

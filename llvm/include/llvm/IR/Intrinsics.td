@@ -1590,6 +1590,9 @@ def int_strip_invariant_group : DefaultAttrsIntrinsic<[llvm_anyptr_ty],
                                           [LLVMMatchType<0>],
                                           [IntrSpeculatable, IntrNoMem, IntrWillReturn]>;
 
+def int_smuggle_ptr : DefaultAttrsIntrinsic<[llvm_ptr_ty],
+                                            [llvm_ptr_ty],
+                                            []>;
 //===------------------------ Stackmap Intrinsics -------------------------===//
 //
 def int_experimental_stackmap : DefaultAttrsIntrinsic<[],
@@ -1729,7 +1732,7 @@ def int_coro_subfn_addr : DefaultAttrsIntrinsic<
 
 ///===-------------------------- Other Intrinsics --------------------------===//
 //
-// TODO: We should introduce a new memory kind fo traps (and other side effects 
+// TODO: We should introduce a new memory kind fo traps (and other side effects
 //       we only model to keep things alive).
 def int_trap : Intrinsic<[], [], [IntrNoReturn, IntrCold, IntrInaccessibleMemOnly,
                IntrWriteMem]>, ClangBuiltin<"__builtin_trap">;

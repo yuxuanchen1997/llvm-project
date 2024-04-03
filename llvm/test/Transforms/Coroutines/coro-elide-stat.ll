@@ -10,7 +10,7 @@
 ; RUN:  cat %t \
 ; RUN:   | FileCheck %s --check-prefix=FILE
 
-; CHECK: 2 coro-elide  - The # of coroutine get elided.
+; CHECK: 4 coro-elide  - The # of coroutine get elided.
 ; FILE: Elide f in callResume
 ; FILE: Elide f in callResumeMultiRetDommmed
 

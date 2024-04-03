@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Coroutines/CoroElide.h"
+#include "CoroInstr.h"
 #include "CoroInternal.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Statistic.h"
@@ -15,6 +16,7 @@
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
 #include <optional>
@@ -37,27 +39,26 @@ struct Lowerer : coro::LowererBase {
   SmallVector<CoroIdInst *, 4> CoroIds;
   SmallVector<CoroBeginInst *, 1> CoroBegins;
   SmallVector<CoroAllocInst *, 1> CoroAllocs;
-  SmallVector<CoroSubFnInst *, 4> ResumeAddr;
-  DenseMap<CoroBeginInst *, SmallVector<CoroSubFnInst *, 4>> DestroyAddr;
+  SmallVector<Instruction *, 4> ResumeAddr;
+  DenseMap<CoroBeginInst *, SmallVector<Instruction *, 4>> DestroyAddr;
   SmallPtrSet<const SwitchInst *, 4> CoroSuspendSwitches;
 
   Lowerer(Module &M) : LowererBase(M) {}
 
   void elideHeapAllocations(Function *F, uint64_t FrameSize, Align FrameAlign,
                             AAResults &AA);
-  bool shouldElide(Function *F, DominatorTree &DT) const;
+  bool shouldElide(CoroIdInst *CoroId, DominatorTree &DT) const;
   void collectPostSplitCoroIds(Function *F);
   bool processCoroId(CoroIdInst *, AAResults &AA, DominatorTree &DT,
                      OptimizationRemarkEmitter &ORE);
-  bool hasEscapePath(const CoroBeginInst *,
-                     const SmallPtrSetImpl<BasicBlock *> &) const;
+  bool canValueEscape(Value *V, const SmallPtrSetImpl<BasicBlock *> &) const;
 };
 } // end anonymous namespace
 
 // Go through the list of coro.subfn.addr intrinsics and replace them with the
 // provided constant.
 static void replaceWithConstant(Constant *Value,
-                                SmallVectorImpl<CoroSubFnInst *> &Users) {
+                                SmallVectorImpl<Instruction *> &Users) {
   if (Users.empty())
     return;
 
@@ -74,7 +75,7 @@ static void replaceWithConstant(Constant *Value,
   }
 
   // Now the value type matches the type of the intrinsic. Replace them all!
-  for (CoroSubFnInst *I : Users)
+  for (Instruction *I : Users)
     replaceAndRecursivelySimplify(I, Value);
 }
 
@@ -178,94 +179,42 @@ void Lowerer::elideHeapAllocations(Function *F, uint64_t FrameSize,
   removeTailCallAttribute(Frame, AA);
 }
 
-bool Lowerer::hasEscapePath(const CoroBeginInst *CB,
-                            const SmallPtrSetImpl<BasicBlock *> &TIs) const {
-  const auto &It = DestroyAddr.find(CB);
-  assert(It != DestroyAddr.end());
+bool Lowerer::canValueEscape(Value *V, const SmallPtrSetImpl<BasicBlock *> &TIs) const {
+  SmallPtrSet<Value *, 10> ToVisit{V->user_begin(), V->user_end()};
+  SmallPtrSet<Value *, 10> Visited;
 
-  // Limit the number of blocks we visit.
-  unsigned Limit = 32 * (1 + It->second.size());
+  while (!ToVisit.empty()) {
+    auto *VV = *ToVisit.begin();
+    Visited.insert(VV);
+    ToVisit.erase(VV);
 
-  SmallVector<const BasicBlock *, 32> Worklist;
-  Worklist.push_back(CB->getParent());
-
-  SmallPtrSet<const BasicBlock *, 32> Visited;
-  // Consider basicblock of coro.destroy as visited one, so that we
-  // skip the path pass through coro.destroy.
-  for (auto *DA : It->second)
-    Visited.insert(DA->getParent());
-
-  SmallPtrSet<const BasicBlock *, 32> EscapingBBs;
-  for (auto *U : CB->users()) {
-    // The use from coroutine intrinsics are not a problem.
-    if (isa<CoroFreeInst, CoroSubFnInst, CoroSaveInst>(U))
-      continue;
-
-    // Think all other usages may be an escaping candidate conservatively.
-    //
-    // Note that the major user of switch ABI coroutine (the C++) will store
-    // resume.fn, destroy.fn and the index to the coroutine frame immediately.
-    // So the parent of the coro.begin in C++ will be always escaping.
-    // Then we can't get any performance benefits for C++ by improving the
-    // precision of the method.
-    //
-    // The reason why we still judge it is we want to make LLVM Coroutine in
-    // switch ABIs to be self contained as much as possible instead of a
-    // by-product of C++20 Coroutines.
-    EscapingBBs.insert(cast<Instruction>(U)->getParent());
-  }
-
-  bool PotentiallyEscaped = false;
-
-  do {
-    const auto *BB = Worklist.pop_back_val();
-    if (!Visited.insert(BB).second)
-      continue;
-
-    // A Path insensitive marker to test whether the coro.begin escapes.
-    // It is intentional to make it path insensitive while it may not be
-    // precise since we don't want the process to be too slow.
-    PotentiallyEscaped |= EscapingBBs.count(BB);
-
-    if (TIs.count(BB)) {
-      if (isa<ReturnInst>(BB->getTerminator()) || PotentiallyEscaped)
-        return true;
-
-      // If the function ends with the exceptional terminator, the memory used
-      // by the coroutine frame can be released by stack unwinding
-      // automatically. So we can think the coro.begin doesn't escape if it
-      // exits the function by exceptional terminator.
-
+    if (isa<CoroFreeInst, CoroSubFnInst, CoroSaveInst, SmugglePtrInst>(VV)) {
       continue;
     }
 
-    // Conservatively say that there is potentially a path.
-    if (!--Limit)
-      return true;
+    if (auto *I = dyn_cast<Instruction>(VV)) {
+      if (TIs.contains(I->getParent())) {
+        return true;
+      }
+    }
 
-    auto TI = BB->getTerminator();
-    // Although the default dest of coro.suspend switches is suspend pointer
-    // which means a escape path to normal terminator, it is reasonable to skip
-    // it since coroutine frame doesn't change outside the coroutine body.
-    if (isa<SwitchInst>(TI) &&
-        CoroSuspendSwitches.count(cast<SwitchInst>(TI))) {
-      Worklist.push_back(cast<SwitchInst>(TI)->getSuccessor(1));
-      Worklist.push_back(cast<SwitchInst>(TI)->getSuccessor(2));
-    } else
-      Worklist.append(succ_begin(BB), succ_end(BB));
+    for (auto *U : VV->users()) {
+      if (!Visited.contains(U)) {
+        ToVisit.insert(U);
+      }
+    }
+  }
 
-  } while (!Worklist.empty());
-
-  // We have exhausted all possible paths and are certain that coro.begin can
-  // not reach to any of terminators.
   return false;
 }
 
-bool Lowerer::shouldElide(Function *F, DominatorTree &DT) const {
+bool Lowerer::shouldElide(CoroIdInst *CoroId, DominatorTree &DT) const {
   // If no CoroAllocs, we cannot suppress allocation, so elision is not
   // possible.
   if (CoroAllocs.empty())
     return false;
+
+  auto *ContainingFunction = CoroId->getFunction();
 
   // Check that for every coro.begin there is at least one coro.destroy directly
   // referencing the SSA value of that coro.begin along each
@@ -277,7 +226,7 @@ bool Lowerer::shouldElide(Function *F, DominatorTree &DT) const {
   // First gather all of the terminators for the function.
   // Consider the final coro.suspend as the real terminator when the current
   // function is a coroutine.
-  for (BasicBlock &B : *F) {
+  for (BasicBlock &B : *ContainingFunction) {
     auto *TI = B.getTerminator();
 
     if (TI->getNumSuccessors() != 0 || isa<UnreachableInst>(TI))
@@ -286,32 +235,25 @@ bool Lowerer::shouldElide(Function *F, DominatorTree &DT) const {
     Terminators.insert(&B);
   }
 
+  SmallPtrSet<CoroBeginInst *, 8> CorrespondingCoroBegins;
+  for (User *U: CoroId->users()) {
+    if (auto *CBI = dyn_cast<CoroBeginInst>(U)) {
+      CorrespondingCoroBegins.insert(CBI);
+    }
+  }
+
   // Filter out the coro.destroy that lie along exceptional paths.
   SmallPtrSet<CoroBeginInst *, 8> ReferencedCoroBegins;
-  for (const auto &It : DestroyAddr) {
-    // If every terminators is dominated by coro.destroy, we could know the
-    // corresponding coro.begin wouldn't escape.
-    //
-    // Otherwise hasEscapePath would decide whether there is any paths from
-    // coro.begin to Terminators which not pass through any of the
-    // coro.destroys.
-    //
-    // hasEscapePath is relatively slow, so we avoid to run it as much as
-    // possible.
-    if (llvm::all_of(Terminators,
-                     [&](auto *TI) {
-                       return llvm::any_of(It.second, [&](auto *DA) {
-                         return DT.dominates(DA, TI->getTerminator());
-                       });
-                     }) ||
-        !hasEscapePath(It.first, Terminators))
-      ReferencedCoroBegins.insert(It.first);
+
+  for (const auto CB : CorrespondingCoroBegins) {
+    if (!canValueEscape(CB, Terminators))
+      ReferencedCoroBegins.insert(CB);
   }
 
   // If size of the set is the same as total number of coro.begin, that means we
   // found a coro.free or coro.destroy referencing each coro.begin, so we can
   // perform heap elision.
-  return ReferencedCoroBegins.size() == CoroBegins.size();
+  return ReferencedCoroBegins.size() == CorrespondingCoroBegins.size();
 }
 
 void Lowerer::collectPostSplitCoroIds(Function *F) {
@@ -358,8 +300,8 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
   // coro.begin directly. If we run into cases where this check is too
   // conservative, we can consider relaxing the check.
   for (CoroBeginInst *CB : CoroBegins) {
-    for (User *U : CB->users())
-      if (auto *II = dyn_cast<CoroSubFnInst>(U))
+    for (User *U : CB->users()) {
+      if (auto *II = dyn_cast<CoroSubFnInst>(U)) {
         switch (II->getIndex()) {
         case CoroSubFnInst::ResumeIndex:
           ResumeAddr.push_back(II);
@@ -370,6 +312,12 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
         default:
           llvm_unreachable("unexpected coro.subfn.addr constant");
         }
+      }
+
+      if (auto *SPI = dyn_cast<SmugglePtrInst>(U)) {
+        DestroyAddr[CB].push_back(SPI);
+      }
+    }
   }
 
   // PostSplit coro.id refers to an array of subfunctions in its Info
@@ -382,7 +330,8 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
 
   replaceWithConstant(ResumeAddrConstant, ResumeAddr);
 
-  bool ShouldElide = shouldElide(CoroId->getFunction(), DT);
+  bool ShouldElide = shouldElide(CoroId, DT);
+  llvm::dbgs() << "ShouldElide: " << ShouldElide << " "; CoroId->dump();
   if (!ShouldElide)
     ORE.emit([&]() {
       if (auto FrameSizeAndAlign =
@@ -402,13 +351,14 @@ bool Lowerer::processCoroId(CoroIdInst *CoroId, AAResults &AA,
                << "' (frame_size=unknown, align=unknown)";
     });
 
-  auto *DestroyAddrConstant = Resumers->getAggregateElement(
-      ShouldElide ? CoroSubFnInst::CleanupIndex : CoroSubFnInst::DestroyIndex);
-
-  for (auto &It : DestroyAddr)
-    replaceWithConstant(DestroyAddrConstant, It.second);
 
   if (ShouldElide) {
+    auto *DestroyAddrConstant = Resumers->getAggregateElement(
+        ShouldElide ? CoroSubFnInst::CleanupIndex : CoroSubFnInst::DestroyIndex);
+
+    for (auto &It : DestroyAddr)
+      replaceWithConstant(DestroyAddrConstant, It.second);
+
     if (auto FrameSizeAndAlign =
             getFrameLayout(cast<Function>(ResumeAddrConstant))) {
       elideHeapAllocations(CoroId->getFunction(), FrameSizeAndAlign->first,

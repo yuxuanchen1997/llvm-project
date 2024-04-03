@@ -1777,6 +1777,17 @@ public:
   }
 };
 
+/// This represents the llvm.smuggle_ptr intrinsic.
+class SmugglePtrInst : public IntrinsicInst {
+public:
+  static bool classof(const IntrinsicInst *I) {
+    return I->getIntrinsicID() == Intrinsic::smuggle_ptr;
+  }
+  static bool classof(const Value *V) {
+    return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+  }
+};
+
 /// Check if \p ID corresponds to a convergence control intrinsic.
 static inline bool isConvergenceControlIntrinsic(unsigned IntrinsicID) {
   switch (IntrinsicID) {

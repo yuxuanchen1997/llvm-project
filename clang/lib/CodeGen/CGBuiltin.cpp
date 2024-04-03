@@ -17,6 +17,7 @@
 #include "CGObjCRuntime.h"
 #include "CGOpenCLRuntime.h"
 #include "CGRecordLayout.h"
+#include "CGValue.h"
 #include "CodeGenFunction.h"
 #include "CodeGenModule.h"
 #include "ConstantEmitter.h"
@@ -4541,6 +4542,12 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
       Ptr = Builder.CreateLaunderInvariantGroup(Ptr);
 
     return RValue::get(Ptr);
+  }
+  case Builtin::BI__builtin_smuggle: {
+    Value *Ptr = EmitScalarExpr(E->getArg(0));
+    Value *SmuggledValue = Builder.CreateCall(CGM.getIntrinsic(Intrinsic::smuggle_ptr), Ptr);
+
+    return RValue::get(SmuggledValue);
   }
   case Builtin::BI__sync_fetch_and_add:
   case Builtin::BI__sync_fetch_and_sub:

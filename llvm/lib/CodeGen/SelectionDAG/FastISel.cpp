@@ -1470,6 +1470,7 @@ bool FastISel::selectIntrinsicCall(const IntrinsicInst *II) {
     return true;
   }
 
+  case Intrinsic::smuggle_ptr:
   case Intrinsic::launder_invariant_group:
   case Intrinsic::strip_invariant_group:
   case Intrinsic::expect: {
