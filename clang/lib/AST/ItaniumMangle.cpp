@@ -4827,8 +4827,15 @@ void CXXNameMangler::mangleRequirement(SourceLocation RequiresExprLoc,
     Out << 'X';
     mangleExpression(ER->getExpr());
 
-    if (ER->hasNoexceptRequirement())
-      Out << 'N';
+    if (ER->hasNoexceptRequirement() &&
+        ER->getNoexceptType() != EST_NoexceptFalse) {
+      if (const Expr *Cond = ER->getNoexceptExpr()) {
+        Out << 'C';
+        mangleExpression(Cond);
+      } else {
+        Out << 'N';
+      }
+    }
 
     if (!ER->getReturnTypeRequirement().isEmpty()) {
       if (ER->getReturnTypeRequirement().isSubstitutionFailure())

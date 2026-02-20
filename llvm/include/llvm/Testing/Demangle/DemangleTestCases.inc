@@ -30141,6 +30141,8 @@
 // C++20 requires expressions, see https://github.com/itanium-cxx-abi/cxx-abi/issues/24.
 {"_Z1fIiEviQrqXcvT__EXfp_Xeqfp_cvS0__EXplcvS0__ELi1ER5SmallXmicvS0__ELi1ENXmlcvS0__ELi2ENR11SmallerThanILi1234EETS0_T1XIS0_ETNS3_4typeETS2_IiEQ11SmallerThanIS0_Li256EEE", "void f<int>(int) requires requires { (T)(); fp; fp == (T)(); {(T)() + 1} -> Small; {(T)() - 1} noexcept; {(T)() * 2} noexcept -> SmallerThan<1234>; typename T; typename X<T>; typename X<T>::type; typename X<int>; requires SmallerThan<T, 256>; }"},
 {"_Z1gIiEviQrQT__XplfL0p_fp_E", "void g<int>(int) requires requires (T) { fp + fp; }"},
+// prototype for P3822
+{"_ZN1SI1PE1gES0_QrqXclsrT_1fECsrS2_10isnoexceptE", "S<P>::g(P) requires requires { {T::f()} noexcept(T::isnoexcept); }"},
 
 // Special Substs a, b, d, i, o, s (not including std::)
 {"_Z1fSaIiE", "f(std::allocator<int>)"},
