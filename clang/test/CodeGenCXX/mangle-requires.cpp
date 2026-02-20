@@ -15,6 +15,7 @@ template <typename T> void f(int n) requires requires {
   {T() + 1} -> Small;
   {T() - 1} noexcept;
   {T() * 2} noexcept -> SmallerThan<1234>;
+  {T() / 2} noexcept(sizeof(T) == 1) -> SmallerThan<1234>;
   // type-requirement
   typename T;
   typename X<T>;
@@ -23,7 +24,7 @@ template <typename T> void f(int n) requires requires {
   // nested-requirement
   requires SmallerThan<T, 256>;
 } {}
-// CHECK: define {{.*}}@_Z1fIiEviQrqXcvT__EXfp_Xeqfp_cvS0__EXplcvS0__ELi1ER5SmallXmicvS0__ELi1ENXmlcvS0__ELi2ENR11SmallerThanILi1234EETS0_T1XIS0_ETNS3_4typeETS2_IiEQ11SmallerThanIS0_Li256EEE(
+// CHECK: define {{.*}}@_Z1fIiEviQrqXcvT__EXfp_Xeqfp_cvS0__EXplcvS0__ELi1ER5SmallXmicvS0__ELi1ENXmlcvS0__ELi2ENR11SmallerThanILi1234EEXdvcvS0__ELi2ECeqstS0_Li1ERS1_ILi1234EETS0_T1XIS0_ETNS3_4typeETS2_IiEQ11SmallerThanIS0_Li256EEE(
 template void f<int>(int);
 
 template <typename T> void g(int n) requires requires (T m) {

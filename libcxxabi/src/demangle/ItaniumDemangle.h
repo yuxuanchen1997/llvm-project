@@ -2517,15 +2517,17 @@ public:
 class ExprRequirement : public Node {
   const Node *Expr;
   bool IsNoexcept;
+  const Node *NoexceptConstraint;
   const Node *TypeConstraint;
 public:
   ExprRequirement(const Node *Expr_, bool IsNoexcept_,
-                  const Node *TypeConstraint_)
+                  const Node *NoexceptConstraint_, const Node *TypeConstraint_)
       : Node(KExprRequirement), Expr(Expr_), IsNoexcept(IsNoexcept_),
+        NoexceptConstraint(NoexceptConstraint_),
         TypeConstraint(TypeConstraint_) {}
 
   template <typename Fn> void match(Fn F) const {
-    F(Expr, IsNoexcept, TypeConstraint);
+    F(Expr, IsNoexcept, NoexceptConstraint, TypeConstraint);
   }
 
   void printLeft(OutputBuffer &OB) const override {
@@ -2535,8 +2537,14 @@ public:
     Expr->print(OB);
     if (IsNoexcept || TypeConstraint)
       OB.printClose('}');
-    if (IsNoexcept)
+    if (IsNoexcept) {
       OB += " noexcept";
+      if (NoexceptConstraint) {
+        OB += '(';
+        NoexceptConstraint->print(OB);
+        OB += ')';
+      }
+    }
     if (TypeConstraint) {
       OB += " -> ";
       TypeConstraint->print(OB);
@@ -5090,17 +5098,26 @@ Node *AbstractManglingParser<Derived, Alloc>::parseRequiresExpr() {
     Node *Constraint = nullptr;
     if (consumeIf('X')) {
       // <requirement> ::= X <expression> [N] [R <type-constraint>]
+      //               ::= X <expression> C <expression> [R <type-constraint>]
       Node *Expr = getDerived().parseExpr();
       if (Expr == nullptr)
         return nullptr;
       bool Noexcept = consumeIf('N');
+      Node *NoexceptCond = nullptr;
+      if (!Noexcept && consumeIf('C')) {
+        Noexcept = true;
+        NoexceptCond = getDerived().parseExpr();
+        if (!NoexceptCond) {
+          return nullptr;
+        }
+      }
       Node *TypeReq = nullptr;
       if (consumeIf('R')) {
         TypeReq = getDerived().parseName();
         if (TypeReq == nullptr)
           return nullptr;
       }
-      Constraint = make<ExprRequirement>(Expr, Noexcept, TypeReq);
+      Constraint = make<ExprRequirement>(Expr, Noexcept, NoexceptCond, TypeReq);
     } else if (consumeIf('T')) {
       // <requirement> ::= T <type>
       Node *Type = getDerived().parseType();
