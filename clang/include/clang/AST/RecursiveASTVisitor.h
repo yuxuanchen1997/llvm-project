@@ -601,6 +601,8 @@ bool RecursiveASTVisitor<Derived>::TraverseConceptExprRequirement(
       TRY_TO(TraverseTypeConstraint(RetReq.getTypeConstraint()));
     }
   }
+  if (R->getNoexceptExpr())
+    TRY_TO(TraverseStmt(R->getNoexceptExpr()));
   return true;
 }
 

@@ -344,12 +344,12 @@ namespace paper_example {
 
 template<typename F, bool noexc>
 concept invocable = requires(F f) {
-  { f() } noexcept(noexc);
+  { f() } noexcept(noexc); // expected-note{{because 'f()' may throw an exception}}
 };
 
 template<bool noexc>
-struct callable_ref {
-  callable_ref(invocable<noexc> auto&& fn);
+struct callable_ref { // expected-note{{candidate constructor}} expected-note{{candidate constructor}}
+  callable_ref(invocable<noexc> auto&& fn); // expected-note{{constraints not satisfied}} expected-note{{evaluated to false}}
 };
 
 void noexcept_func() noexcept {}
@@ -365,7 +365,7 @@ static_assert(invocable<decltype(throwing_func), false>);
 
 // Verify callable_ref can be instantiated correctly
 callable_ref<true> cr1{noexcept_func};
-// callable_ref<true> cr2{throwing_func}; // Would fail: throwing_func doesn't satisfy invocable<true>
+callable_ref<true> cr2{throwing_func}; // expected-error{{no matching constructor}}
 
 callable_ref<false> cr3{noexcept_func};
 callable_ref<false> cr4{throwing_func};
