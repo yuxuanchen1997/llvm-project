@@ -583,8 +583,11 @@ void TextNodeDumper::Visit(const concepts::Requirement *R) {
   dumpPointer(R);
 
   if (auto *ER = dyn_cast<concepts::ExprRequirement>(R)) {
-    if (ER->hasNoexceptRequirement())
+    if (ER->hasNoexceptRequirement()) {
       OS << " noexcept";
+      if (ER->getNoexceptExpr())
+        OS << "(expr)";
+    }
   }
 
   if (R->isDependent())

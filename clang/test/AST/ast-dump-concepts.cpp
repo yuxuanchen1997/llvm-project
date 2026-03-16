@@ -135,3 +135,17 @@ void g(C<T> auto Foo) {}
 // CHECK-NEXT: `-ConceptSpecializationExpr {{.*}} <col:8, col:11>
 
 }
+
+namespace NoexceptRequirement {
+
+template<typename T>
+concept Foo = requires { { T() } noexcept(sizeof(T) == 1); };
+
+// CHECK: CompoundRequirement {{.*}} noexcept(expr)
+// CHECK-NEXT: |-CXXUnresolvedConstructExpr {{.*}} 'T' 'T'
+// CHECK-NEXT: `-BinaryOperator {{.*}} 'bool' '=='
+// CHECK-NEXT:   |-UnaryExprOrTypeTraitExpr {{.*}} sizeof
+// CHECK-NEXT:   `-ImplicitCastExpr {{.*}} <IntegralCast>
+// CHECK-NEXT:     `-IntegerLiteral {{.*}} 'int' 1
+
+} // namespace NoexceptRequirement

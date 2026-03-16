@@ -277,6 +277,9 @@ public:
       } else if (auto *ER = dyn_cast<concepts::ExprRequirement>(R)) {
         if (!ER->isExprSubstitutionFailure())
           Visit(ER->getExpr());
+        if (ER->hasNoexceptRequirement())
+          if (Expr *NoexceptExpr = ER->getNoexceptExpr())
+            Visit(NoexceptExpr);
         if (!ER->getReturnTypeRequirement().isEmpty())
           Visit(ER->getReturnTypeRequirement()
                     .getTypeConstraint()
